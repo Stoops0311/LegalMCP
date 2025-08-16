@@ -267,11 +267,89 @@ class IndianKanoonClient {
   }
 }
 
+// Section validation ranges
+const VALID_IPC_SECTIONS = { min: 1, max: 511 };
+const VALID_BNS_SECTIONS = { min: 1, max: 358 };
+const VALID_CRPC_SECTIONS = { min: 1, max: 484 };
+
+// Validate section numbers and suggest corrections
+function validateSection(sectionNum: string, codeType: string = 'IPC'): {
+  isValid: boolean;
+  suggestion?: string;
+  nearestValid?: string[];
+} {
+  // Extract numeric part
+  const numMatch = sectionNum.match(/^(\d+)([A-Z])?$/);
+  if (!numMatch) {
+    return { isValid: false, suggestion: 'Invalid section format' };
+  }
+  
+  const num = parseInt(numMatch[1]);
+  const suffix = numMatch[2] || '';
+  
+  let range = VALID_IPC_SECTIONS;
+  if (codeType === 'BNS') range = VALID_BNS_SECTIONS;
+  else if (codeType === 'CrPC') range = VALID_CRPC_SECTIONS;
+  
+  if (num >= range.min && num <= range.max) {
+    return { isValid: true };
+  }
+  
+  // Suggest closest valid sections
+  const nearestValid: string[] = [];
+  
+  // Common typos and their corrections
+  const commonMistakes: Record<string, string[]> = {
+    '823': ['323', '423'], // Likely meant 323 or 423
+    '523': ['323', '423'],
+    '325': ['323', '324', '326'], // Hurt-related sections
+    '121': ['120', '120A', '120B'], // Criminal conspiracy
+    '412': ['411', '413', '414'], // Stolen property sections
+    '299': ['299', '300', '302'], // Murder-related
+    '380': ['379', '381', '382'], // Theft-related
+  };
+  
+  if (commonMistakes[num.toString()]) {
+    nearestValid.push(...commonMistakes[num.toString()]);
+  }
+  
+  // If number is too high, suggest removing first digit
+  if (num > range.max && num > 100) {
+    const withoutFirst = num.toString().substring(1);
+    if (withoutFirst.length > 0) {
+      const suggested = parseInt(withoutFirst);
+      if (suggested >= range.min && suggested <= range.max) {
+        nearestValid.push(withoutFirst);
+      }
+    }
+  }
+  
+  // Suggest nearby valid sections
+  for (let offset of [-1, 1, -2, 2, -10, 10]) {
+    const nearby = num + offset;
+    if (nearby >= range.min && nearby <= range.max) {
+      nearestValid.push(nearby.toString());
+    }
+  }
+  
+  return {
+    isValid: false,
+    suggestion: `Section ${sectionNum} appears invalid for ${codeType}`,
+    nearestValid: [...new Set(nearestValid)].slice(0, 5)
+  };
+}
+
 // Preprocess query to extract sections and normalize format
 interface ProcessedQuery {
   originalQuery: string;
   normalizedQuery: string;
   extractedSections: string[];
+  validatedSections: Array<{
+    original: string;
+    validated: string;
+    isValid: boolean;
+    suggestions?: string[];
+  }>;
   legalConcepts: string[];
   searchVariants: string[];
 }
@@ -281,6 +359,7 @@ function preprocessQuery(query: string): ProcessedQuery {
     originalQuery: query,
     normalizedQuery: query,
     extractedSections: [],
+    validatedSections: [],
     legalConcepts: [],
     searchVariants: []
   };
@@ -293,11 +372,28 @@ function preprocessQuery(query: string): ProcessedQuery {
     /\b(\d{3}[A-Z]?)\s+(?:IPC|BNS|CrPC)/gi
   ];
   
+  // Detect code type from query
+  let codeType = 'IPC';
+  if (query.toLowerCase().includes('bns')) codeType = 'BNS';
+  else if (query.toLowerCase().includes('crpc')) codeType = 'CrPC';
+  
   for (const pattern of sectionPatterns) {
     let match;
     while ((match = pattern.exec(query)) !== null) {
       const sections = match[1].split(/\s*,\s*/);
-      processed.extractedSections.push(...sections.map(s => s.trim()));
+      for (const section of sections) {
+        const trimmed = section.trim();
+        processed.extractedSections.push(trimmed);
+        
+        // Validate each section
+        const validation = validateSection(trimmed, codeType);
+        processed.validatedSections.push({
+          original: trimmed,
+          validated: validation.isValid ? trimmed : (validation.nearestValid?.[0] || trimmed),
+          isValid: validation.isValid,
+          suggestions: validation.nearestValid
+        });
+      }
     }
   }
   
@@ -1269,65 +1365,336 @@ export default function createStatelessServer({
           true
         );
 
-        // Define more comprehensive legal weight markers
+        // Comprehensive legal weight detection system
         const legalMarkers = {
           ratioDecidendi: [
+            // Core holdings
             /we hold that/i,
             /it is settled law/i,
             /the principle is/i,
             /we are of the opinion/i,
             /the law is well[\s-]?settled/i,
             /it is trite law/i,
-            /the ratio of/i
+            /the ratio of/i,
+            /therefore guilty/i,
+            /conviction is confirmed/i,
+            /appeal is dismissed/i,
+            /petition is allowed/i,
+            /we conclude that/i,
+            /accordingly,?\s+we\s+hold/i,
+            /the\s+legal\s+position\s+is/i,
+            /it\s+is\s+no\s+longer\s+res\s+integra/i,
+            /the\s+proposition\s+of\s+law/i,
+            /we\s+answer\s+the\s+reference/i,
+            /our\s+answer\s+to\s+the\s+question/i,
+            /the\s+principle\s+that\s+emerges/i,
+            /it\s+must\s+be\s+held/i,
+            /we\s+have\s+no\s+hesitation/i,
+            /undoubtedly/i,
+            /unquestionably/i,
+            /it\s+is\s+beyond\s+dispute/i,
+            /there\s+can\s+be\s+no\s+doubt/i,
+            /the\s+inevitable\s+conclusion/i,
+            /we\s+are\s+satisfied\s+that/i,
+            /accordingly\s+convicted/i,
+            /sentence\s+is\s+confirmed/i,
+            /acquittal\s+is\s+set\s+aside/i,
+            /conviction\s+is\s+set\s+aside/i,
+            /appeal\s+is\s+allowed/i,
+            /writ\s+petition\s+is\s+allowed/i,
+            /bail\s+is\s+granted/i,
+            /bail\s+is\s+rejected/i,
+            /quashing\s+is\s+allowed/i,
+            /proceedings\s+are\s+quashed/i,
+            /FIR\s+is\s+quashed/i,
+            /charge[\s-]?sheet\s+is\s+quashed/i,
+            // Constitutional bench holdings
+            /speaking\s+for\s+the\s+bench/i,
+            /unanimous\s+decision/i,
+            /majority\s+opinion/i,
+            /per\s+curiam/i
           ],
           obiterDicta: [
             /it may be noted/i,
             /incidentally/i,
             /in passing/i,
             /by the way/i,
-            /parenthetically/i
+            /parenthetically/i,
+            /en\s+passant/i,
+            /for\s+the\s+sake\s+of\s+completeness/i,
+            /though\s+not\s+necessary/i,
+            /even\s+assuming/i,
+            /assuming\s+without\s+deciding/i,
+            /without\s+expressing\s+any\s+opinion/i,
+            /academic\s+interest/i,
+            /hypothetically/i,
+            /arguably/i,
+            /perhaps/i,
+            /it\s+appears/i,
+            /it\s+seems/i,
+            /one\s+may\s+argue/i,
+            /for\s+what\s+it\s+is\s+worth/i,
+            /tangentially/i,
+            /as\s+an\s+aside/i,
+            /not\s+strictly\s+necessary/i,
+            /abundance\s+of\s+caution/i,
+            /without\s+going\s+into/i,
+            /need\s+not\s+be\s+decided/i,
+            /left\s+open/i,
+            /not\s+called\s+upon/i,
+            /beyond\s+the\s+scope/i
           ],
           distinguishing: [
             /however in the present case/i,
             /facts are different/i,
             /not applicable here/i,
             /distinguishable from/i,
-            /can be distinguished/i
+            /can be distinguished/i,
+            /materially\s+different/i,
+            /factually\s+distinct/i,
+            /on\s+facts/i,
+            /peculiar\s+facts/i,
+            /special\s+circumstances/i,
+            /unlike\s+in/i,
+            /contrary\s+to/i,
+            /as\s+opposed\s+to/i,
+            /in\s+contrast/i,
+            /dissimilar/i,
+            /inapposite/i,
+            /has\s+no\s+application/i,
+            /cannot\s+be\s+applied/i,
+            /different\s+context/i,
+            /not\s+on\s+all\s+fours/i,
+            /stands\s+on\s+different\s+footing/i,
+            /different\s+considerations/i,
+            /exceptional\s+case/i,
+            /sui\s+generis/i
           ],
           following: [
             /following the decision/i,
             /relying on/i,
             /as held in/i,
-            /applying the principle/i
+            /applying the principle/i,
+            /in\s+line\s+with/i,
+            /consistent\s+with/i,
+            /as\s+observed\s+in/i,
+            /as\s+laid\s+down/i,
+            /reiterating/i,
+            /reaffirming/i,
+            /endorsing\s+the\s+view/i,
+            /adopting\s+the\s+reasoning/i,
+            /squarely\s+covered/i,
+            /directly\s+applicable/i,
+            /on\s+all\s+fours/i,
+            /binding\s+precedent/i,
+            /authoritative\s+pronouncement/i,
+            /ratio\s+applies/i,
+            /principle\s+enunciated/i,
+            /dictum\s+in/i
+          ],
+          overruling: [
+            /overruled/i,
+            /no\s+longer\s+good\s+law/i,
+            /cannot\s+be\s+sustained/i,
+            /per\s+incuriam/i,
+            /wrongly\s+decided/i,
+            /erroneous\s+view/i,
+            /departed\s+from/i,
+            /not\s+approved/i,
+            /doubted/i,
+            /reconsidered/i,
+            /contrary\s+to\s+law/i,
+            /unsustainable/i,
+            /bad\s+in\s+law/i,
+            /set\s+aside\s+the\s+judgment/i,
+            /reversed/i,
+            /cannot\s+be\s+accepted/i,
+            /rejected\s+the\s+contention/i,
+            /disapproved/i
+          ],
+          proceduralDirections: [
+            /directed\s+to/i,
+            /it\s+is\s+ordered/i,
+            /registry\s+is\s+directed/i,
+            /shall\s+comply/i,
+            /immediate\s+effect/i,
+            /with\s+immediate\s+effect/i,
+            /forthwith/i,
+            /expeditiously/i,
+            /within\s+\d+\s+weeks/i,
+            /time\s+bound/i,
+            /liberty\s+to\s+apply/i,
+            /list\s+the\s+matter/i,
+            /remanded\s+to/i,
+            /sent\s+back/i,
+            /fresh\s+consideration/i,
+            /de\s+novo/i,
+            /status\s+quo/i,
+            /interim\s+order/i,
+            /till\s+further\s+orders/i,
+            /stayed/i
+          ],
+          concessionsAdmissions: [
+            /fairly\s+conceded/i,
+            /admitted\s+that/i,
+            /not\s+disputed/i,
+            /not\s+in\s+controversy/i,
+            /common\s+ground/i,
+            /undisputed\s+fact/i,
+            /accepted\s+position/i,
+            /admittedly/i,
+            /confessedly/i,
+            /no\s+quarrel/i,
+            /rightly\s+conceded/i,
+            /candidly\s+admitted/i,
+            /on\s+admission/i,
+            /learned\s+counsel\s+agrees/i,
+            /not\s+pressed/i,
+            /given\s+up/i,
+            /abandoned/i,
+            /withdrawn/i
+          ],
+          judicialDisagreement: [
+            /with\s+respect/i,
+            /with\s+due\s+respect/i,
+            /respectfully\s+disagree/i,
+            /unable\s+to\s+agree/i,
+            /different\s+view/i,
+            /minority\s+view/i,
+            /dissenting\s+opinion/i,
+            /contra\s+view/i,
+            /alternative\s+view/i,
+            /however\s+i\s+would/i,
+            /in\s+my\s+opinion/i,
+            /divergent\s+views/i,
+            /conflict\s+of\s+opinion/i,
+            /referring\s+to\s+larger\s+bench/i,
+            /reference\s+is\s+made/i,
+            /requires\s+reconsideration/i,
+            /doubt\s+is\s+expressed/i
+          ],
+          statutoryInterpretation: [
+            /plain\s+meaning/i,
+            /literal\s+interpretation/i,
+            /legislative\s+intent/i,
+            /object\s+and\s+purpose/i,
+            /mischief\s+rule/i,
+            /golden\s+rule/i,
+            /harmonious\s+construction/i,
+            /purposive\s+interpretation/i,
+            /strict\s+construction/i,
+            /liberal\s+construction/i,
+            /ejusdem\s+generis/i,
+            /noscitur\s+a\s+sociis/i,
+            /expressio\s+unius/i,
+            /reading\s+down/i,
+            /reading\s+into/i,
+            /casus\s+omissus/i,
+            /statutory\s+scheme/i,
+            /contextual\s+interpretation/i,
+            /beneficial\s+construction/i,
+            /penal\s+statute/i
+          ],
+          evidenceEvaluation: [
+            /cogent\s+evidence/i,
+            /credible\s+witness/i,
+            /unreliable\s+testimony/i,
+            /contradictions\s+in\s+evidence/i,
+            /material\s+improvement/i,
+            /embellishment/i,
+            /tutored\s+witness/i,
+            /interested\s+witness/i,
+            /independent\s+witness/i,
+            /corroboration/i,
+            /circumstantial\s+evidence/i,
+            /chain\s+of\s+circumstances/i,
+            /preponderance\s+of\s+probability/i,
+            /beyond\s+reasonable\s+doubt/i,
+            /benefit\s+of\s+doubt/i,
+            /hostile\s+witness/i,
+            /dying\s+declaration/i,
+            /res\s+gestae/i,
+            /admission\s+against\s+interest/i,
+            /burden\s+of\s+proof/i,
+            /onus\s+shifts/i,
+            /presumption/i,
+            /rebuttal/i
           ]
         };
 
         const principles = completeParagraphs.map((para, index) => {
-          // Determine legal weight based on content
+          // Comprehensive legal weight determination
           let legalWeight = "Supporting Observation";
           let confidence = 0.5;
+          let weightDetails: string[] = [];
           
-          for (const [weight, patterns] of Object.entries(legalMarkers)) {
-            if (patterns.some(pattern => pattern.test(para.text))) {
-              switch (weight) {
+          // Check each category and accumulate matches
+          for (const [category, patterns] of Object.entries(legalMarkers)) {
+            const matches = patterns.filter(pattern => pattern.test(para.text));
+            if (matches.length > 0) {
+              weightDetails.push(`${category}(${matches.length})`);
+              
+              // Priority-based weight assignment
+              switch (category) {
                 case 'ratioDecidendi':
                   legalWeight = "Ratio Decidendi";
-                  confidence = 0.9;
+                  confidence = Math.min(0.9 + (matches.length * 0.02), 1.0);
                   break;
-                case 'obiterDicta':
-                  legalWeight = "Obiter Dicta";
-                  confidence = 0.6;
+                case 'overruling':
+                  if (legalWeight !== "Ratio Decidendi") {
+                    legalWeight = "Overruling Precedent";
+                    confidence = 0.85;
+                  }
                   break;
-                case 'distinguishing':
-                  legalWeight = "Distinguishing";
-                  confidence = 0.7;
+                case 'statutoryInterpretation':
+                  if (!['Ratio Decidendi', 'Overruling Precedent'].includes(legalWeight)) {
+                    legalWeight = "Statutory Interpretation";
+                    confidence = 0.8;
+                  }
+                  break;
+                case 'evidenceEvaluation':
+                  if (!['Ratio Decidendi', 'Overruling Precedent', 'Statutory Interpretation'].includes(legalWeight)) {
+                    legalWeight = "Evidence Analysis";
+                    confidence = 0.75;
+                  }
                   break;
                 case 'following':
-                  legalWeight = "Following Precedent";
-                  confidence = 0.8;
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Following Precedent";
+                    confidence = 0.8;
+                  }
+                  break;
+                case 'distinguishing':
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Distinguishing";
+                    confidence = 0.7;
+                  }
+                  break;
+                case 'proceduralDirections':
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Procedural Direction";
+                    confidence = 0.65;
+                  }
+                  break;
+                case 'concessionsAdmissions':
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Concession/Admission";
+                    confidence = 0.7;
+                  }
+                  break;
+                case 'judicialDisagreement':
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Judicial Disagreement";
+                    confidence = 0.6;
+                  }
+                  break;
+                case 'obiterDicta':
+                  if (legalWeight === "Supporting Observation") {
+                    legalWeight = "Obiter Dicta";
+                    confidence = 0.55;
+                  }
                   break;
               }
-              break;
             }
           }
           
@@ -1361,6 +1728,7 @@ export default function createStatelessServer({
               neutral: metadata.tid ? `[Doc ID: ${metadata.tid}], para ${para.paragraphNumber}` : undefined
             },
             legalWeight: legalWeight,
+            weightDetails: weightDetails.length > 0 ? weightDetails : undefined,
             confidence: confidence,
             searchTermMatches: searchTerms.filter(term => 
               para.text.toLowerCase().includes(term.toLowerCase())
