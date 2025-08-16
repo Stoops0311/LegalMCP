@@ -1,0 +1,196 @@
+# Session Configuration
+
+Allow clients to connect to MCP servers with specific configuration settings.
+
+## Overview
+
+Session configurations provide flexibility in how your MCP server behaves for each specific client connection. Each user can customize their session differently, and configurations provide a secure way for them to pass secrets (e.g., API keys) to your server.
+
+## How Configurations Work
+
+Every MCP server can define what configuration parameters it accepts. These parameters might include API keys, model settings, temperature values, or any other options that affect how the server responds to requests.
+
+> **Note**: Configurations are bound to individual sessions. Each client connection has its own configuration that doesn't affect other sessions.
+
+## Defining Configuration Schema
+
+Define what configuration your MCP server needs using JSON Schema in your `smithery.yaml` file:
+
+```yaml
+startCommand:
+  type: http
+  configSchema:
+    type: object
+    required: ["openaiApiKey"]
+    properties:
+      openaiApiKey:
+        type: string
+        title: "OpenAI API Key"
+        description: "Your OpenAI API key"
+      modelName:
+        type: string
+        title: "Model Name"
+        default: "gpt-4"
+        enum: ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"]
+      temperature:
+        type: number
+        title: "Temperature"
+        description: "Controls randomness of output"
+        default: 0.7
+        minimum: 0
+        maximum: 1
+```
+
+The `configSchema` supports all standard JSON Schema features:
+
+- Data types (`string`, `number`, `boolean`, etc.)
+- Required fields
+- Default values
+- Enumerated options
+- Min/max constraints
+- Descriptive titles and documentation
+
+## Receiving Configuration in Your Server
+
+Your MCP server receives configuration as a base64-encoded JSON object in the `config` query parameter:
+
+```
+GET/POST /mcp?config=eyJzZXJ2ZXIiOnsiaG9zdCI6ImxvY2FsaG9zdCIsInBvcnQiOjgwODB9LCJkZWJ1ZyI6dHJ1ZX0=
+```
+
+### Parsing Configuration
+
+**TypeScript Example:**
+```typescript
+// Parse configuration from query parameters
+function parseConfig(req: Request) {
+  const url = new URL(req.url);
+  const configParam = url.searchParams.get('config');
+  if (configParam) {
+    return JSON.parse(Buffer.from(configParam, 'base64').toString());
+  }
+  return {};
+}
+
+// Usage in your MCP tool
+const config = parseConfig(request);
+const dbUrl = config.connectionString;
+const maxResults = config.maxResults || 10;
+```
+
+**Python Example:**
+```python
+import json
+import base64
+from urllib.parse import parse_qs, urlparse
+
+def parse_config(request_url: str) -> dict:
+    """Parse base64-encoded config from query parameters."""
+    parsed_url = urlparse(request_url)
+    params = parse_qs(parsed_url.query)
+    
+    if 'config' in params:
+        config_b64 = params['config'][0]
+        config_json = base64.b64decode(config_b64).decode('utf-8')
+        return json.loads(config_json)
+    
+    return {}
+
+# Usage
+config = parse_config(request.url)
+```
+
+### Using Configuration in Tools
+
+```typescript
+// Example: Using config in an MCP tool
+server.registerTool("query_database", {
+  description: "Query the database with user's connection",
+  inputSchema: {
+    query: { type: "string", description: "SQL query to execute" }
+  }
+}, async ({ query }, { request }) => {
+  const config = parseConfig(request);
+  
+  // Use configuration values
+  const dbUrl = config.connectionString;
+  const maxResults = config.maxResults || 10;
+  const apiKey = config.openaiApiKey;
+  
+  // Connect to user's specific database
+  const connection = await connectToDatabase(dbUrl);
+  const results = await connection.query(query, { limit: maxResults });
+  
+  return {
+    content: [{ type: "text", text: JSON.stringify(results) }]
+  };
+});
+```
+
+## Configuration Examples
+
+### Minimal Configuration
+
+If your server doesn't need any configuration:
+
+```yaml
+startCommand:
+  type: http
+  configSchema: {}
+```
+
+### Database Connection Configuration
+
+```yaml
+startCommand:
+  type: http
+  configSchema:
+    type: object
+    required: ["connectionString"]
+    properties:
+      connectionString:
+        type: string
+        title: "Connection String"
+        description: "Database connection string"
+      maxConnections:
+        type: integer
+        default: 5
+        minimum: 1
+        maximum: 20
+      debug:
+        type: boolean
+        default: false
+```
+
+## Best Practices
+
+1. **Provide Clear Documentation**
+   - Use `description` fields in your schema
+   - Document any non-obvious parameters
+
+2. **Set Sensible Defaults**
+   - Users should be able to connect with minimal configuration
+   - Use the `default` property for optional parameters
+
+3. **Use Enums for Limited Choices**
+   - When there are specific valid options, list them in an `enum`
+   - This creates a dropdown in the UI instead of a free text field
+
+4. **Handle Configuration Securely**
+   - Pass secrets as environment variables when possible
+   - Never log or expose configuration values
+   - Validate input server-side even though Smithery performs validation
+
+5. **Keep Configurations Small**
+   - Focus on essential parameters
+   - Large binary data should not be passed via configuration
+
+## Troubleshooting
+
+**Invalid Configuration**: If a configuration doesn't match the schema, Smithery will reject the connection attempt and provide an error message.
+
+**Mid-Session Changes**: Configurations cannot be changed during a session. To use a different configuration, establish a new connection.
+
+**Optional Fields**: Fields not in the `required` array are optional. Provide defaults using the `default` property.
+
+**Finding Schema**: View any MCP server's configuration schema in its API Tab on the server page.
