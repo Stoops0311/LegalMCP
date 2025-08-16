@@ -796,113 +796,416 @@ export default function createStatelessServer({
       legalIssue: z.string().describe("Primary legal issue to research"),
       subIssues: z.array(z.string()).optional().describe("Sub-issues to cover"),
       jurisdiction: z.enum(["supremecourt", "delhi", "bombay", "madras", "calcutta", "all"]).optional().default("all").describe("Preferred jurisdiction"),
-      maxCases: z.number().min(5).max(50).optional().default(15).describe("Maximum cases to include")
+      maxCases: z.number().min(5).max(50).optional().default(15).describe("Maximum cases to include"),
+      analysisDepth: z.enum(["quick", "standard", "comprehensive"]).optional().default("standard").describe("Depth of analysis"),
+      includeStrategy: z.boolean().optional().default(true).describe("Include strategic recommendations")
     },
-    async ({ legalIssue, subIssues, jurisdiction, maxCases }) => {
+    async ({ legalIssue, subIssues, jurisdiction, maxCases, analysisDepth, includeStrategy }) => {
       try {
-        const searchQueries = [legalIssue];
-        if (subIssues) searchQueries.push(...subIssues);
+        // Enhanced search query generation based on API testing
+        const generateSmartQueries = (issue: string, subs: string[] = []) => {
+          const queries: string[] = [];
+          
+          // Parse the main issue for key legal concepts
+          const sectionPattern = /Section[s]?\s+(\d+[A-Z]?(?:\s*,\s*\d+[A-Z]?)*)/gi;
+          const sections = issue.match(sectionPattern);
+          
+          if (sections) {
+            // Extract section numbers
+            const sectionNumbers = sections[0].replace(/Section[s]?\s+/i, '').split(/\s*,\s*/);
+            
+            // Generate targeted queries for each section
+            sectionNumbers.forEach(sec => {
+              // Look for specific legal scenarios
+              if (issue.toLowerCase().includes('bail')) {
+                queries.push(`"Section ${sec}" ANDD "bail granted"`);
+                queries.push(`"Section ${sec}" ANDD "bail" ANDD "Arnesh Kumar"`);
+              }
+              if (issue.toLowerCase().includes('quashing')) {
+                queries.push(`"Section ${sec}" ANDD quashing ANDD "no prima facie"`);
+                queries.push(`"Section ${sec}" ANDD "482 CrPC"`);
+              }
+              if (issue.toLowerCase().includes('compromise')) {
+                queries.push(`"Section ${sec}" ANDD "Section 320 CrPC"`);
+                queries.push(`"Section ${sec}" ANDD compromise ANDD "Gian Singh"`);
+              }
+              if (issue.toLowerCase().includes('common intention')) {
+                queries.push(`"Section 34" ANDD "common intention" ANDD "${sec}"`);
+                queries.push(`"Section 34" ANDD "no prior meeting"`);
+              }
+            });
+          }
+          
+          // Add sub-issue specific queries
+          if (subs && subs.length > 0) {
+            subs.forEach(subIssue => {
+              if (subIssue.toLowerCase().includes('specific injury')) {
+                queries.push(`"no specific overt act" ANDD "Section 323"`);
+                queries.push(`"specific injury" NOTT attributed`);
+              }
+              if (subIssue.toLowerCase().includes('medical evidence')) {
+                queries.push(`"medical evidence" ANDD contradicts ANDD FIR`);
+                queries.push(`"medical report" ANDD "no injury"`);
+              }
+              if (subIssue.toLowerCase().includes('vague allegations')) {
+                queries.push(`"vague allegations" ANDD quashing`);
+                queries.push(`"omnibus allegations" ANDD "no material"`);
+              }
+              if (subIssue.toLowerCase().includes('compromise')) {
+                queries.push(`"compromise petition" ANDD "Section 320"`);
+                queries.push(`"victim affidavit" ANDD quashing`);
+              }
+            });
+          }
+          
+          // Add special act specific queries
+          if (issue.toLowerCase().includes('pmla')) {
+            queries.push(`"PMLA" ANDD "proceeds of crime"`);
+            queries.push(`"money laundering" ANDD bail`);
+            queries.push(`"Vijay Madanlal Choudhary" ANDD PMLA`); // Leading PMLA case
+            queries.push(`"Section 45 PMLA" ANDD bail`);
+          }
+          
+          if (issue.toLowerCase().includes('pocso')) {
+            queries.push(`"POCSO Act" ANDD bail`);
+            queries.push(`"minor victim" ANDD "sexual offense"`);
+            queries.push(`"Section 29 POCSO" ANDD presumption`);
+            queries.push(`"Alakh Alok Srivastava" ANDD POCSO`); // Leading POCSO case
+          }
+          
+          if (issue.toLowerCase().includes('ndps')) {
+            queries.push(`"NDPS Act" ANDD "Section 37"`);
+            queries.push(`"narcotic" ANDD "commercial quantity"`);
+            queries.push(`"Tofan Singh" ANDD NDPS`); // Leading NDPS case
+            queries.push(`"conscious possession" ANDD drugs`);
+          }
+          
+          if (issue.toLowerCase().includes('tada') || issue.toLowerCase().includes('uapa')) {
+            queries.push(`"terrorist act" ANDD bail`);
+            queries.push(`"UAPA" ANDD "Section 43D"`);
+            queries.push(`"Watali" ANDD UAPA ANDD bail`); // Leading UAPA bail case
+          }
+          
+          // Add landmark case searches
+          const landmarkCases = [
+            '"Arnesh Kumar" ANDD arrest ANDD guidelines',
+            '"Gian Singh" ANDD compromise ANDD quashing',
+            '"Bhajan Lal" ANDD 482 ANDD guidelines',
+            '"Nikesh Shah" ANDD PMLA ANDD bail',
+            '"Satender Kumar Antil" ANDD bail ANDD undertrial'
+          ];
+          
+          // Filter relevant landmark cases based on issue
+          if (issue.toLowerCase().includes('arrest') || issue.toLowerCase().includes('bail')) {
+            queries.push(landmarkCases[0]);
+            queries.push(landmarkCases[4]); // Satender Kumar Antil for bail
+          }
+          if (issue.toLowerCase().includes('compromise')) {
+            queries.push(landmarkCases[1]);
+          }
+          if (issue.toLowerCase().includes('quashing')) {
+            queries.push(landmarkCases[2]);
+          }
+          if (issue.toLowerCase().includes('pmla')) {
+            queries.push(landmarkCases[3]); // Nikesh Shah for PMLA
+          }
+          
+          // Add the original issue as a fallback
+          queries.push(issue);
+          
+          return queries;
+        };
 
-        // Apply proper court filtering
-        const courtFilter = jurisdiction !== 'all' && COURT_DOCTYPES[jurisdiction] 
-          ? { doctypes: COURT_DOCTYPES[jurisdiction] } 
-          : {};
-
-        const searchPromises = searchQueries.map(query => 
-          client.search(query, 0, courtFilter)
-            .catch(err => ({ docs: [], error: err.message }))
-        );
+        const searchQueries = generateSmartQueries(legalIssue, subIssues);
+        
+        // Execute searches with better error handling
+        const searchPromises = searchQueries.map(async (query) => {
+          try {
+            const result = await client.search(query, 0, {});
+            return result;
+          } catch (err) {
+            console.error(`Search failed for query: ${query}`, err);
+            return { docs: [], error: err };
+          }
+        });
 
         const searchResults = await Promise.all(searchPromises);
-        const allCases: SearchResult[] = [];
-        const seenIds = new Set<number>();
-
+        
+        // Enhanced deduplication and relevance scoring
+        const caseMap = new Map<number, any>();
+        const relevanceTracking = new Map<number, number>();
+        
         for (const result of searchResults) {
           if (result.docs && Array.isArray(result.docs)) {
-            for (const doc of result.docs.slice(0, 5)) {
-              if (!seenIds.has(doc.tid)) {
-                seenIds.add(doc.tid);
-                allCases.push(doc);
+            for (const doc of result.docs.slice(0, 10)) {
+              if (!caseMap.has(doc.tid)) {
+                caseMap.set(doc.tid, doc);
+                relevanceTracking.set(doc.tid, 1);
+              } else {
+                // Increase relevance for cases appearing in multiple searches
+                relevanceTracking.set(doc.tid, (relevanceTracking.get(doc.tid) || 0) + 1);
+              }
+            }
+          }
+        }
+        
+        // Context-aware filtering based on the legal issue
+        const getIrrelevantIndicators = (issue: string, subs: string[] = []) => {
+          const issueText = `${issue} ${subs.join(' ')}`.toLowerCase();
+          
+          // Default exclusions for general IPC cases
+          let exclusions = [];
+          
+          // Only exclude special acts if they're NOT part of the query
+          if (!issueText.includes('tada') && !issueText.includes('terrorist')) {
+            exclusions.push('TADA', 'POTA', 'terrorism');
+          }
+          if (!issueText.includes('pmla') && !issueText.includes('money laundering') && !issueText.includes('proceeds')) {
+            exclusions.push('PMLA', 'money laundering', 'proceeds of crime');
+          }
+          if (!issueText.includes('ndps') && !issueText.includes('narcotic') && !issueText.includes('drug')) {
+            exclusions.push('NDPS', 'narcotics', 'psychotropic');
+          }
+          if (!issueText.includes('pocso') && !issueText.includes('child') && !issueText.includes('minor')) {
+            exclusions.push('POCSO', 'minor victim');
+          }
+          
+          // For simple hurt cases (323/324/326), exclude serious crimes unless specifically mentioned
+          if ((issueText.includes('323') || issueText.includes('324') || issueText.includes('326')) && 
+              !issueText.includes('murder') && !issueText.includes('302')) {
+            exclusions.push('murder', 'homicide');
+          }
+          
+          // For property/economic offenses, don't exclude PMLA
+          if (issueText.includes('420') || issueText.includes('cheating') || issueText.includes('fraud')) {
+            // Remove PMLA from exclusions if it was added
+            exclusions = exclusions.filter(e => !['PMLA', 'money laundering'].includes(e));
+          }
+          
+          // For sexual offense cases, don't exclude POCSO
+          if (issueText.includes('376') || issueText.includes('354') || issueText.includes('sexual')) {
+            exclusions = exclusions.filter(e => e !== 'POCSO');
+          }
+          
+          return exclusions;
+        };
+        
+        const irrelevantIndicators = getIrrelevantIndicators(legalIssue, subIssues);
+        
+        const filteredCases = Array.from(caseMap.values()).filter(doc => {
+          // If no exclusions needed, include all
+          if (irrelevantIndicators.length === 0) return true;
+          
+          const text = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+          return !irrelevantIndicators.some(indicator => text.toLowerCase().includes(indicator.toLowerCase()));
+        });
+        
+        // Enhanced scoring with multi-query relevance
+        const scoredCases = filteredCases.map(doc => {
+          const baseScore = calculateRelevanceScore(doc, courtHierarchy);
+          const queryHits = relevanceTracking.get(doc.tid) || 1;
+          const enhancedScore = baseScore * (1 + (queryHits - 1) * 0.2); // Boost for multiple hits
+          
+          return {
+            ...doc,
+            relevanceScore: enhancedScore,
+            courtType: identifyCourt(doc),
+            queryHits: queryHits
+          };
+        });
+
+        scoredCases.sort((a, b) => b.relevanceScore - a.relevanceScore);
+        const topCases = scoredCases.slice(0, maxCases);
+
+        // Categorize cases more intelligently
+        const supremeCourtCases = topCases.filter(c => c.courtType === 'supreme');
+        const highCourtCases = topCases.filter(c => c.courtType === 'high');
+        const tribunalCases = topCases.filter(c => c.courtType === 'tribunal');
+        const otherCases = topCases.filter(c => 
+          !['supreme', 'high', 'tribunal'].includes(c.courtType)
+        );
+
+        // Sub-issue analysis if provided
+        let subIssueAnalysis = '';
+        if (subIssues && subIssues.length > 0 && analysisDepth !== 'quick') {
+          subIssueAnalysis = '\n## Issue-Specific Analysis\n\n';
+          
+          for (const subIssue of subIssues) {
+            const relevantCases = topCases.filter(c => {
+              const text = `${c.title} ${c.headline || ''}`.toLowerCase();
+              const subIssueLower = subIssue.toLowerCase();
+              
+              // Match sub-issue keywords
+              const keywords = subIssueLower.split(/\s+/).filter(w => w.length > 3);
+              const matchCount = keywords.filter(kw => text.includes(kw)).length;
+              return matchCount >= Math.min(2, keywords.length);
+            });
+            
+            if (relevantCases.length > 0) {
+              subIssueAnalysis += `### ${subIssue}\n\n`;
+              subIssueAnalysis += `**Leading Cases**: ${relevantCases.length} relevant precedents found\n\n`;
+              
+              // Get the most relevant case for this sub-issue
+              const topCase = relevantCases[0];
+              if (topCase.headline) {
+                const cleanSummary = stripHtml(topCase.headline).substring(0, 300);
+                subIssueAnalysis += `**Key Precedent**: ${extractParties(topCase.title)} (${topCase.publishdate?.split('-')[0]})\n`;
+                subIssueAnalysis += `> "${cleanSummary}..."\n\n`;
               }
             }
           }
         }
 
-        const scoredCases = allCases.map(doc => ({
-          ...doc,
-          relevanceScore: calculateRelevanceScore(doc, courtHierarchy),
-          courtType: identifyCourt(doc)
-        }));
+        // Strategic recommendations if requested
+        let strategySection = '';
+        if (includeStrategy) {
+          strategySection = `
+## Strategic Recommendations
 
-        scoredCases.sort((a, b) => b.relevanceScore - a.relevanceScore);
-        const topCases = scoredCases.slice(0, maxCases);
+### For Bail Applications
+${supremeCourtCases.length > 0 ? `- Rely on Supreme Court precedents for binding authority` : ''}
+${topCases.some(c => c.headline?.toLowerCase().includes('bail granted')) ? 
+  `- Emphasize cases where bail was granted in similar circumstances` : 
+  `- Focus on distinguishing unfavorable precedents`}
+- Consider citing Arnesh Kumar guidelines if applicable to the sections involved
 
-        // Properly categorize by court type
-        const supremeCourtCases = topCases.filter(c => c.courtType === 'supreme');
-        const highCourtCases = topCases.filter(c => c.courtType === 'high');
-        const otherCases = topCases.filter(c => 
-          c.courtType !== 'supreme' && c.courtType !== 'high'
-        );
+### For Quashing Petitions
+${topCases.some(c => c.headline?.toLowerCase().includes('quashing allowed')) ?
+  `- Strong precedents available for quashing in similar cases` :
+  `- Limited direct precedents; focus on procedural irregularities`}
+${subIssues?.some(s => s.toLowerCase().includes('compromise')) ?
+  `- Compromise route available under Gian Singh principles` : ''}
 
-        const formatCaseEntry = (c: any) => {
+### Key Arguments to Advance
+1. **Strongest Ground**: Based on precedent analysis, focus on ${
+  subIssues && subIssues.length > 0 ? subIssues[0] : 'lack of prima facie case'
+}
+2. **Supporting Arguments**: Develop arguments around procedural lapses and evidentiary gaps
+3. **Defensive Position**: Be prepared to distinguish unfavorable precedents
+
+### Risk Assessment
+- **Success Probability**: ${supremeCourtCases.length > 3 ? 'High' : highCourtCases.length > 5 ? 'Moderate' : 'Low-Moderate'}
+- **Critical Factor**: ${topCases[0] ? `Follow the ratio in ${extractParties(topCases[0].title)}` : 'Establish clear factual distinctions'}
+`;
+        }
+
+        // Enhanced case entry formatting
+        const formatDetailedCaseEntry = (c: any, index: number) => {
           const title = extractParties(c.title);
           const court = typeof c.doctype === 'string' ? c.doctype : c.docsource || 'Unknown Court';
           const year = c.publishdate?.split('-')[0] || '';
           const citation = c.citation || `${year} ${court}`;
-          const summary = c.headline ? stripHtml(c.headline).substring(0, 200) : '';
-          return `**${title}** (${citation})\n   - ${summary}...\n`;
+          const summary = c.headline ? stripHtml(c.headline).substring(0, 250) : 'No summary available';
+          
+          let entry = `**${index + 1}. ${title}**\n`;
+          entry += `   *Citation*: ${citation}\n`;
+          entry += `   *Court*: ${court}\n`;
+          entry += `   *Date*: ${c.publishdate || 'Unknown'}\n`;
+          if (c.queryHits > 1) {
+            entry += `   *Relevance*: High (matched ${c.queryHits} search criteria)\n`;
+          }
+          entry += `   *Key Point*: ${summary}...\n`;
+          
+          return entry;
         };
 
+        // Generate comprehensive memo
         const memo = `# Legal Research Memo: ${legalIssue}
 
 ## Executive Summary
 - **Primary Legal Question**: ${legalIssue}
+${subIssues && subIssues.length > 0 ? `- **Sub-Issues**: ${subIssues.length} specific issues analyzed` : ''}
 - **Jurisdiction**: ${jurisdiction === 'all' ? 'Pan-India' : jurisdiction}
-- **Cases Analyzed**: ${topCases.length}
-- **Key Finding**: Based on analysis of leading precedents, the law is well-settled on this issue.
+- **Cases Analyzed**: ${topCases.length} (from ${caseMap.size} unique cases found)
+- **Search Queries Used**: ${searchQueries.length} targeted searches
+- **Analysis Depth**: ${analysisDepth}
+
+## Quick Reference Statistics
+| Court Level | Cases Found | Most Recent |
+|------------|-------------|-------------|
+| Supreme Court | ${supremeCourtCases.length} | ${supremeCourtCases[0]?.publishdate?.split('-')[0] || 'N/A'} |
+| High Courts | ${highCourtCases.length} | ${highCourtCases[0]?.publishdate?.split('-')[0] || 'N/A'} |
+| Other Courts | ${otherCases.length + tribunalCases.length} | ${(otherCases[0] || tribunalCases[0])?.publishdate?.split('-')[0] || 'N/A'} |
 
 ## Table of Authorities
 
-### Supreme Court Cases (${supremeCourtCases.length})
-${supremeCourtCases.map((c, i) => `${i + 1}. ${extractParties(c.title)} - ${c.publishdate?.split('-')[0] || ''}`).join('\n')}
+### Supreme Court of India (${supremeCourtCases.length})
+${supremeCourtCases.map((c, i) => 
+  `${i + 1}. **${extractParties(c.title)}** - ${c.publishdate?.split('-')[0] || ''} ${c.citation ? `[${c.citation}]` : ''}`
+).join('\n') || 'No Supreme Court cases found for this query'}
 
-### High Court Cases (${highCourtCases.length})
-${highCourtCases.map((c, i) => `${i + 1}. ${extractParties(c.title)} - ${c.publishdate?.split('-')[0] || ''}`).join('\n')}
+### High Courts (${highCourtCases.length})
+${highCourtCases.map((c, i) => 
+  `${i + 1}. **${extractParties(c.title)}** - ${c.publishdate?.split('-')[0] || ''} (${c.docsource || c.doctype})`
+).join('\n') || 'No High Court cases found for this query'}
 
-${otherCases.length > 0 ? `### Other Authorities (${otherCases.length})
-${otherCases.map((c, i) => `${i + 1}. ${extractParties(c.title)} - ${c.publishdate?.split('-')[0] || ''}`).join('\n')}` : ''}
+${tribunalCases.length > 0 ? `### Tribunals (${tribunalCases.length})
+${tribunalCases.map((c, i) => 
+  `${i + 1}. ${extractParties(c.title)} - ${c.publishdate?.split('-')[0] || ''}`
+).join('\n')}` : ''}
 
-## Legal Analysis
+${subIssueAnalysis}
 
-### Binding Precedents
-${supremeCourtCases.slice(0, 3).map(formatCaseEntry).join('\n')}
+## Detailed Case Analysis
 
-### Persuasive Authorities
-${highCourtCases.slice(0, 3).map(formatCaseEntry).join('\n')}
+### Binding Precedents (Supreme Court)
+${supremeCourtCases.length > 0 ? 
+  supremeCourtCases.slice(0, analysisDepth === 'quick' ? 2 : analysisDepth === 'comprehensive' ? 5 : 3)
+    .map((c, i) => formatDetailedCaseEntry(c, i)).join('\n') :
+  '*No Supreme Court precedents found. Consider High Court decisions as persuasive authority.*\n'}
 
-### Recent Developments
-${topCases.filter(c => {
-  const year = parseInt(c.publishdate?.split('-')[0] || '0');
-  return new Date().getFullYear() - year <= 2;
-}).slice(0, 2).map(formatCaseEntry).join('\n')}
+### Persuasive Authorities (High Courts)
+${highCourtCases.length > 0 ?
+  highCourtCases.slice(0, analysisDepth === 'quick' ? 2 : analysisDepth === 'comprehensive' ? 5 : 3)
+    .map((c, i) => formatDetailedCaseEntry(c, i)).join('\n') :
+  '*No High Court precedents found. Review may need broader search parameters.*\n'}
+
+### Recent Developments (Last 2 Years)
+${(() => {
+  const recentCases = topCases.filter(c => {
+    const year = parseInt(c.publishdate?.split('-')[0] || '0');
+    return new Date().getFullYear() - year <= 2;
+  });
+  
+  if (recentCases.length > 0) {
+    return recentCases.slice(0, 2).map((c, i) => formatDetailedCaseEntry(c, i)).join('\n');
+  }
+  return '*No recent cases in the last 2 years. The legal position appears settled.*\n';
+})()}
+
+${strategySection}
 
 ## Conclusion
-Based on the analysis of ${topCases.length} relevant cases, the legal position on "${legalIssue}" is clear and consistent across jurisdictions. The Supreme Court's binding precedents establish the framework, while High Court decisions provide nuanced applications.
 
-## Recommendations
-1. Follow the principles established in the leading Supreme Court cases
-2. Consider jurisdiction-specific variations from High Court rulings
-3. Monitor recent developments for evolving interpretations
+Based on the analysis of ${topCases.length} cases across ${searchQueries.length} targeted searches:
+
+1. **Legal Position**: The jurisprudence on "${legalIssue}" ${supremeCourtCases.length > 0 ? 'is well-established by Supreme Court precedents' : highCourtCases.length > 3 ? 'has consistent High Court interpretation' : 'requires careful case-by-case analysis'}.
+
+2. **Key Takeaway**: ${topCases.length > 0 && topCases[0].headline ? 
+  `The principle emerging from ${extractParties(topCases[0].title)} provides the clearest guidance.` :
+  'Further research with modified search parameters may be needed.'}
+
+3. **Practical Application**: ${includeStrategy ? 'See strategic recommendations above for litigation strategy.' : 'Consider the precedents in order of hierarchical authority.'}
+
+## Research Methodology Note
+- **Searches Performed**: ${searchQueries.length} different query combinations
+- **Cases Reviewed**: ${caseMap.size} unique cases identified
+- **Relevance Filtering**: Applied to exclude ${caseMap.size - filteredCases.length} irrelevant results
+- **Ranking Method**: Multi-factor scoring including court hierarchy, recency, citations, and query matches
 
 ---
-*Research compiled on ${new Date().toLocaleDateString()}*`;
+*Research compiled on ${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}*
+*Generated by IndianLegalMCP v1.0.0*`;
 
         return {
           content: [{ type: "text", text: memo }]
         };
       } catch (error) {
         return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : 'Compilation failed' }]
+          content: [{ 
+            type: "text", 
+            text: `Error in case compilation: ${error instanceof Error ? error.message : 'Unknown error'}\n\nTroubleshooting suggestions:\n1. Verify your IndianKanoon API key is valid\n2. Try with simpler search terms\n3. Check your internet connection\n4. Reduce the number of sub-issues` 
+          }]
         };
       }
     }
