@@ -267,6 +267,248 @@ class IndianKanoonClient {
   }
 }
 
+// Preprocess query to extract sections and normalize format
+interface ProcessedQuery {
+  originalQuery: string;
+  normalizedQuery: string;
+  extractedSections: string[];
+  legalConcepts: string[];
+  searchVariants: string[];
+}
+
+function preprocessQuery(query: string): ProcessedQuery {
+  const processed: ProcessedQuery = {
+    originalQuery: query,
+    normalizedQuery: query,
+    extractedSections: [],
+    legalConcepts: [],
+    searchVariants: []
+  };
+  
+  // Extract section numbers with various formats
+  const sectionPatterns = [
+    /\bsections?\s+(\d+[A-Z]?(?:\s*,\s*\d+[A-Z]?)*)/gi,
+    /\bu\/s\s+(\d+[A-Z]?(?:\s*,\s*\d+[A-Z]?)*)/gi,
+    /\bsec\.?\s+(\d+[A-Z]?)/gi,
+    /\b(\d{3}[A-Z]?)\s+(?:IPC|BNS|CrPC)/gi
+  ];
+  
+  for (const pattern of sectionPatterns) {
+    let match;
+    while ((match = pattern.exec(query)) !== null) {
+      const sections = match[1].split(/\s*,\s*/);
+      processed.extractedSections.push(...sections.map(s => s.trim()));
+    }
+  }
+  
+  // Extract legal concepts
+  const conceptPatterns = [
+    /\b(bail|quashing|compromise|arrest|conviction|acquittal|sentence)\b/gi,
+    /\b(prima facie|mens rea|actus reus|mala fide|bona fide)\b/gi,
+    /\b(common intention|criminal conspiracy|abetment)\b/gi
+  ];
+  
+  for (const pattern of conceptPatterns) {
+    let match;
+    while ((match = pattern.exec(query)) !== null) {
+      processed.legalConcepts.push(match[1].toLowerCase());
+    }
+  }
+  
+  // Normalize query variations
+  let normalized = query;
+  normalized = normalized.replace(/\bu\/s\b/gi, 'under Section');
+  normalized = normalized.replace(/\br\/w\b/gi, 'read with');
+  normalized = normalized.replace(/\bSec\.?\s+/gi, 'Section ');
+  normalized = normalized.replace(/\s+/g, ' ').trim();
+  processed.normalizedQuery = normalized;
+  
+  // Generate search variants based on extracted data
+  if (processed.extractedSections.length > 0) {
+    // Variant 1: Sections with quotes
+    processed.searchVariants.push(
+      processed.extractedSections.map(s => `"Section ${s}"`).join(' ')
+    );
+    
+    // Variant 2: Sections with IPC/BNS
+    processed.searchVariants.push(
+      processed.extractedSections.map(s => `Section ${s} IPC`).join(' ')
+    );
+    
+    // Variant 3: With legal concepts
+    if (processed.legalConcepts.length > 0) {
+      processed.searchVariants.push(
+        `${processed.extractedSections[0]} ${processed.legalConcepts[0]}`
+      );
+    }
+  }
+  
+  // Add normalized query as a variant
+  processed.searchVariants.push(normalized);
+  
+  // Add query with ANDD operators
+  const withAndd = normalized.replace(/\s+/g, ' ANDD ');
+  processed.searchVariants.push(withAndd);
+  
+  return processed;
+}
+
+// Calculate relevance score between query and document
+function calculateQueryRelevance(
+  query: ProcessedQuery, 
+  doc: SearchResult,
+  baseScore: number = 1.0
+): number {
+  let score = baseScore;
+  
+  // Check section matches (highest weight - 40%)
+  if (query.extractedSections.length > 0) {
+    const docText = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+    const sectionMatches = query.extractedSections.filter(section => {
+      // Check various formats
+      return docText.includes(`section ${section}`) ||
+             docText.includes(`${section} ipc`) ||
+             docText.includes(`sec. ${section}`) ||
+             docText.includes(`s. ${section}`);
+    });
+    
+    if (sectionMatches.length > 0) {
+      score *= (1 + (sectionMatches.length / query.extractedSections.length) * 0.4);
+    } else {
+      // Penalize if no sections match when sections were requested
+      score *= 0.5;
+    }
+  }
+  
+  // Check legal concept matches (30% weight)
+  if (query.legalConcepts.length > 0) {
+    const docText = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+    const conceptMatches = query.legalConcepts.filter(concept =>
+      docText.includes(concept)
+    );
+    
+    if (conceptMatches.length > 0) {
+      score *= (1 + (conceptMatches.length / query.legalConcepts.length) * 0.3);
+    }
+  }
+  
+  // Check keyword density (20% weight)
+  const queryWords = query.normalizedQuery.toLowerCase()
+    .split(/\s+/)
+    .filter(w => w.length > 3 && !['under', 'section', 'with'].includes(w));
+  
+  if (queryWords.length > 0) {
+    const docText = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+    const wordMatches = queryWords.filter(word => docText.includes(word));
+    score *= (1 + (wordMatches.length / queryWords.length) * 0.2);
+  }
+  
+  // Court hierarchy bonus (10% weight) - already handled in base score
+  
+  return score;
+}
+
+// Generate alternative queries when search fails
+function generateAlternativeQueries(originalQuery: string, processed: ProcessedQuery): string[] {
+  const alternatives: string[] = [];
+  
+  // Strategy 1: Just sections if available
+  if (processed.extractedSections.length > 0) {
+    alternatives.push(processed.extractedSections.map(s => `Section ${s}`).join(' '));
+    alternatives.push(processed.extractedSections.map(s => `"Section ${s}" IPC`).join(' ORR '));
+  }
+  
+  // Strategy 2: Just legal concepts
+  if (processed.legalConcepts.length > 0) {
+    alternatives.push(processed.legalConcepts.join(' '));
+    if (processed.extractedSections.length > 0) {
+      alternatives.push(`${processed.legalConcepts[0]} ${processed.extractedSections[0]}`);
+    }
+  }
+  
+  // Strategy 3: Remove quoted phrases
+  const withoutQuotes = originalQuery.replace(/"[^"]*"/g, '').trim();
+  if (withoutQuotes !== originalQuery && withoutQuotes.length > 0) {
+    alternatives.push(withoutQuotes);
+  }
+  
+  // Strategy 4: Broader search with main keywords
+  const mainKeywords = originalQuery
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 4 && !['under', 'section', 'with', 'read'].includes(w.toLowerCase()))
+    .slice(0, 3);
+  
+  if (mainKeywords.length > 0) {
+    alternatives.push(mainKeywords.join(' '));
+  }
+  
+  // Strategy 5: If nothing else works, suggest generic searches
+  if (alternatives.length === 0) {
+    if (originalQuery.toLowerCase().includes('bail')) {
+      alternatives.push('bail application granted', 'anticipatory bail guidelines');
+    }
+    if (originalQuery.toLowerCase().includes('quash')) {
+      alternatives.push('482 CrPC quashing', 'FIR quashing grounds');
+    }
+  }
+  
+  // Return unique alternatives
+  return [...new Set(alternatives)].slice(0, 5);
+}
+
+// Analyze why a search failed and provide guidance
+function analyzeSearchFailure(query: string, processed: ProcessedQuery): {
+  reason: string;
+  suggestions: string[];
+  alternativeQueries: string[];
+} {
+  const analysis = {
+    reason: '',
+    suggestions: [] as string[],
+    alternativeQueries: [] as string[]
+  };
+  
+  // Check if query is too specific
+  if (query.split(/\s+/).length > 10) {
+    analysis.reason = 'Query may be too specific';
+    analysis.suggestions.push('Try using fewer words or just the key legal terms');
+  }
+  
+  // Check if sections might be incorrect
+  if (processed.extractedSections.length > 0) {
+    const uncommonSections = processed.extractedSections.filter(s => {
+      const num = parseInt(s);
+      return num > 511 || num < 1;
+    });
+    
+    if (uncommonSections.length > 0) {
+      analysis.reason = 'Some section numbers appear invalid';
+      analysis.suggestions.push('Verify the section numbers are correct');
+      analysis.suggestions.push('Try searching without section numbers');
+    }
+  }
+  
+  // Check if mixing incompatible terms
+  if (query.includes('civil') && query.includes('IPC')) {
+    analysis.reason = 'Query mixes civil and criminal law terms';
+    analysis.suggestions.push('IPC is for criminal cases - remove "civil" from query');
+  }
+  
+  // If no specific issue found
+  if (!analysis.reason) {
+    analysis.reason = 'No exact matches found for your query';
+    analysis.suggestions.push('Try broadening your search terms');
+    analysis.suggestions.push('Remove quotes to allow partial matches');
+    analysis.suggestions.push('Search for the general legal principle instead of specific facts');
+  }
+  
+  // Generate alternative queries
+  analysis.alternativeQueries = generateAlternativeQueries(query, processed);
+  
+  return analysis;
+}
+
 // Helper function to format errors with actionable feedback
 function formatError(error: any, context: string): string {
   const errorMsg = error instanceof Error ? error.message : String(error);
@@ -333,8 +575,104 @@ function extractCaseNumber(metadata: any): string {
   return metadata.tid?.toString() || `[No. ${new Date().getFullYear()}]`;
 }
 
-// Enhanced HTML stripping function
-function stripHtml(html: string): string {
+// Find natural sentence boundary for complete text extraction
+function findSentenceBoundary(text: string, startPos: number, maxLength: number = 1500): number {
+  // If text is shorter than max, return full length
+  if (text.length <= maxLength) {
+    return text.length;
+  }
+  
+  // Look for sentence endings after minimum length
+  const minLength = Math.min(1000, maxLength * 0.7);
+  const searchText = text.substring(startPos + minLength, startPos + maxLength + 200);
+  
+  // Patterns that indicate sentence end
+  const sentenceEndings = [
+    /\.\s+[A-Z]/g,  // Period followed by capital letter
+    /\.\"\s+/g,     // Period, quote, space
+    /\.\)\s+/g,     // Period, parenthesis, space
+    /\?\s+/g,       // Question mark
+    /!\s+/g,        // Exclamation mark
+    /\.\s*$/g       // Period at end
+  ];
+  
+  let bestPosition = -1;
+  
+  for (const pattern of sentenceEndings) {
+    let match;
+    while ((match = pattern.exec(searchText)) !== null) {
+      const position = startPos + minLength + match.index + 1;
+      if (position < startPos + maxLength && position > bestPosition) {
+        bestPosition = position;
+      }
+    }
+  }
+  
+  // If no sentence ending found, look for other natural breaks
+  if (bestPosition === -1) {
+    const fallbackPatterns = [
+      /;\s+/g,        // Semicolon
+      /:\s+/g,        // Colon
+      /\n\n/g,        // Paragraph break
+      /\.\s*/g        // Any period
+    ];
+    
+    for (const pattern of fallbackPatterns) {
+      let match;
+      while ((match = pattern.exec(searchText)) !== null) {
+        const position = startPos + minLength + match.index + 1;
+        if (position < startPos + maxLength && position > bestPosition) {
+          bestPosition = position;
+          break; // Take first fallback match
+        }
+      }
+    }
+  }
+  
+  // If still no break found, just use max length
+  return bestPosition > 0 ? bestPosition : startPos + maxLength;
+}
+
+// Extract real paragraph numbers from HTML fragments
+function extractRealParagraphNumber(htmlFragment: string): string | null {
+  // Strategy 1: Look for data-structure attribute
+  const dataStructureMatch = htmlFragment.match(/data-structure="[^"]*"\s+id="p_(\d+)"/);
+  if (dataStructureMatch) {
+    return dataStructureMatch[1];
+  }
+  
+  // Strategy 2: Look for id attribute in p or div tags
+  const idMatch = htmlFragment.match(/(?:<p|<div)[^>]*\sid="(?:p_|para_?)(\d+)"/i);
+  if (idMatch) {
+    return idMatch[1];
+  }
+  
+  // Strategy 3: Look for blockquote with id
+  const blockquoteMatch = htmlFragment.match(/<blockquote[^>]*\sid="blockquote_(\d+)"/i);
+  if (blockquoteMatch) {
+    return blockquoteMatch[1];
+  }
+  
+  // Strategy 4: Look for explicit paragraph numbering in text
+  const textParaMatch = htmlFragment.match(/(?:^|\s)(\d+)\.\s*(?=[A-Z])/);
+  if (textParaMatch) {
+    return textParaMatch[1];
+  }
+  
+  // Strategy 5: Look for paragraph markers in content
+  const paraMarkerMatch = htmlFragment.match(/\[(\d+)\]|\¶\s*(\d+)|para(?:graph)?\s+(\d+)/i);
+  if (paraMarkerMatch) {
+    return paraMarkerMatch[1] || paraMarkerMatch[2] || paraMarkerMatch[3];
+  }
+  
+  return null;
+}
+
+// Enhanced HTML stripping function with paragraph preservation
+function stripHtml(html: string, preserveStructure: boolean = false): string {
+  // First extract paragraph number if present
+  const paraNum = extractRealParagraphNumber(html);
+  
   // Preserve line breaks
   let text = html.replace(/<br\s*\/?>/gi, '\n');
   text = text.replace(/<\/p>/gi, '\n\n');
@@ -354,7 +692,9 @@ function stripHtml(html: string): string {
     '&rsquo;': "'",
     '&lsquo;': "'",
     '&rdquo;': '"',
-    '&ldquo;': '"'
+    '&ldquo;': '"',
+    '&ndash;': '-',
+    '&mdash;': '—'
   };
   
   for (const [entity, char] of Object.entries(entities)) {
@@ -365,7 +705,54 @@ function stripHtml(html: string): string {
   text = text.replace(/\n{3,}/g, '\n\n');
   text = text.replace(/[ \t]+/g, ' ');
   
+  // If paragraph number was found and structure should be preserved, prepend it
+  if (preserveStructure && paraNum) {
+    text = `[Para ${paraNum}] ${text}`;
+  }
+  
   return text.trim();
+}
+
+// Extract complete paragraphs without truncation
+function extractCompleteParagraphs(
+  fragments: string[], 
+  maxLength: number = 2000,
+  includeParaNumbers: boolean = true
+): Array<{
+  text: string;
+  paragraphNumber: string;
+  isComplete: boolean;
+}> {
+  const paragraphs: Array<{
+    text: string;
+    paragraphNumber: string;
+    isComplete: boolean;
+  }> = [];
+  
+  for (let i = 0; i < fragments.length; i++) {
+    const fragment = fragments[i];
+    const paraNum = extractRealParagraphNumber(fragment) || `${i + 1}`;
+    const cleanText = stripHtml(fragment, false);
+    
+    // Check if text needs truncation
+    if (cleanText.length <= maxLength) {
+      paragraphs.push({
+        text: cleanText,
+        paragraphNumber: paraNum,
+        isComplete: true
+      });
+    } else {
+      // Find natural boundary for truncation
+      const boundary = findSentenceBoundary(cleanText, 0, maxLength);
+      paragraphs.push({
+        text: cleanText.substring(0, boundary),
+        paragraphNumber: paraNum,
+        isComplete: boundary >= cleanText.length
+      });
+    }
+  }
+  
+  return paragraphs;
 }
 
 // Enhanced paragraph detection
@@ -599,18 +986,20 @@ export default function createStatelessServer({
       courtLevel: z.enum(["supremecourt", "delhi", "bombay", "madras", "calcutta", "all"]).optional().describe("Filter by court level"),
       dateFrom: z.string().optional().describe("Start date in DD-MM-YYYY format"),
       dateTo: z.string().optional().describe("End date in DD-MM-YYYY format"),
-      maxResults: z.number().min(1).max(100).optional().describe("Maximum results to return")
+      maxResults: z.number().min(1).max(100).optional().describe("Maximum results to return"),
+      relevanceThreshold: z.number().min(0).max(5).optional().default(0.5).describe("Minimum relevance score to include results")
     },
-    async ({ query, courtLevel, dateFrom, dateTo, maxResults }) => {
+    async ({ query, courtLevel, dateFrom, dateTo, maxResults, relevanceThreshold }) => {
       try {
         const limit = maxResults || config.maxSearchResults;
         
-        // Build search variants
-        const searchVariants = [
-          { formInput: query, pagenum: 0 },
-          { formInput: `"${query}"`, pagenum: 0 },
-          { formInput: query.replace(/\s+(and|or)\s+/gi, ' ').replace(/\s+/g, ' ANDD '), pagenum: 0 }
-        ];
+        // Preprocess the query to extract sections and normalize
+        const processedQuery = preprocessQuery(query);
+        
+        // Use processed search variants
+        const searchVariants = processedQuery.searchVariants.length > 0 
+          ? processedQuery.searchVariants.slice(0, 5).map(v => ({ formInput: v, pagenum: 0 }))
+          : [{ formInput: query, pagenum: 0 }];
 
         // Apply court-specific filtering
         const filters: any = {};
@@ -643,6 +1032,35 @@ export default function createStatelessServer({
           }
         }
 
+        // Check if we have any results
+        if (allDocs.length === 0) {
+          // Analyze why search failed and provide guidance
+          const failureAnalysis = analyzeSearchFailure(query, processedQuery);
+          
+          return {
+            content: [{ 
+              type: "text", 
+              text: JSON.stringify({
+                cases: [],
+                totalResults: 0,
+                searchStatus: "NO_RESULTS",
+                error: {
+                  reason: failureAnalysis.reason,
+                  suggestions: failureAnalysis.suggestions,
+                  alternativeQueries: failureAnalysis.alternativeQueries,
+                  message: "No cases found. Try the alternative queries suggested below."
+                },
+                searchMetadata: {
+                  originalQuery: query,
+                  processedQuery: processedQuery,
+                  variantsSearched: searchVariants.map(v => v.formInput),
+                  filtersApplied: Object.entries(filters).map(([k, v]) => `${k}: ${v}`)
+                }
+              }, null, 2)
+            }]
+          };
+        }
+
         // Post-filter for court if specified
         let filteredDocs = allDocs;
         if (courtLevel && courtLevel !== 'all') {
@@ -663,13 +1081,76 @@ export default function createStatelessServer({
           });
         }
 
-        const scoredDocs = filteredDocs.map(doc => ({
-          ...doc,
-          relevanceScore: calculateRelevanceScore(doc, courtHierarchy)
-        }));
+        // Calculate relevance scores with query-based scoring
+        const scoredDocs = filteredDocs.map(doc => {
+          const baseScore = calculateRelevanceScore(doc, courtHierarchy);
+          const queryScore = calculateQueryRelevance(processedQuery, doc, baseScore);
+          return {
+            ...doc,
+            relevanceScore: queryScore,
+            matchedSections: processedQuery.extractedSections.filter(section => {
+              const docText = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+              return docText.includes(`section ${section}`) || 
+                     docText.includes(`${section} ipc`);
+            }),
+            matchedConcepts: processedQuery.legalConcepts.filter(concept => {
+              const docText = `${doc.title} ${doc.headline || ''}`.toLowerCase();
+              return docText.includes(concept);
+            })
+          };
+        });
 
-        scoredDocs.sort((a, b) => b.relevanceScore - a.relevanceScore);
-        const topDocs = scoredDocs.slice(0, limit);
+        // Filter by relevance threshold
+        const relevantDocs = scoredDocs.filter(doc => doc.relevanceScore >= relevanceThreshold);
+        
+        // Sort by relevance
+        relevantDocs.sort((a, b) => b.relevanceScore - a.relevanceScore);
+        const topDocs = relevantDocs.slice(0, limit);
+
+        // Check if we filtered out too many results
+        if (topDocs.length === 0 && scoredDocs.length > 0) {
+          // Lower threshold and take top results anyway
+          const bestAvailable = scoredDocs
+            .sort((a, b) => b.relevanceScore - a.relevanceScore)
+            .slice(0, Math.min(5, limit));
+            
+          const formattedResults = bestAvailable.map(doc => ({
+            id: doc.tid.toString(),
+            title: doc.title,
+            court: typeof doc.doctype === 'string' ? doc.doctype : doc.docsource || 'Unknown Court',
+            year: doc.publishdate?.split('-')[0] || 'Unknown',
+            relevanceScore: doc.relevanceScore.toFixed(2),
+            matchedSections: doc.matchedSections || [],
+            matchedConcepts: doc.matchedConcepts || [],
+            summary: doc.headline ? stripHtml(doc.headline).substring(0, 300) + '...' : 'No summary available',
+            citations: doc.citation ? [doc.citation] : [],
+            citedByCount: doc.numcitedby || 0,
+            relevanceNote: "Below threshold but best available matches"
+          }));
+
+          return {
+            content: [{ 
+              type: "text", 
+              text: JSON.stringify({
+                cases: formattedResults,
+                totalResults: bestAvailable.length,
+                searchStatus: "LOW_RELEVANCE",
+                note: `Results below relevance threshold of ${relevanceThreshold}. Showing best available matches.`,
+                suggestions: [
+                  "Try broader search terms",
+                  "Remove specific case details",
+                  "Search by legal principle instead of facts"
+                ],
+                searchMetadata: {
+                  queryUsed: query,
+                  extractedSections: processedQuery.extractedSections,
+                  extractedConcepts: processedQuery.legalConcepts,
+                  filtersApplied: Object.entries(filters).map(([k, v]) => `${k}: ${v}`)
+                }
+              }, null, 2)
+            }]
+          };
+        }
 
         const formattedResults = topDocs.map(doc => ({
           id: doc.tid.toString(),
@@ -677,7 +1158,9 @@ export default function createStatelessServer({
           court: typeof doc.doctype === 'string' ? doc.doctype : doc.docsource || 'Unknown Court',
           year: doc.publishdate?.split('-')[0] || 'Unknown',
           relevanceScore: doc.relevanceScore.toFixed(2),
-          summary: doc.headline ? stripHtml(doc.headline).substring(0, 200) + '...' : 'No summary available',
+          matchedSections: doc.matchedSections || [],
+          matchedConcepts: doc.matchedConcepts || [],
+          summary: doc.headline ? stripHtml(doc.headline).substring(0, 300) + '...' : 'No summary available',
           citations: doc.citation ? [doc.citation] : [],
           citedByCount: doc.numcitedby || 0,
           keyPrinciples: []
@@ -685,10 +1168,15 @@ export default function createStatelessServer({
 
         const response = {
           cases: formattedResults,
-          totalResults: allDocs.length,
+          totalResults: topDocs.length,
+          searchStatus: "SUCCESS",
           searchMetadata: {
             queryUsed: query,
-            filtersApplied: Object.entries(filters).map(([k, v]) => `${k}: ${v}`)
+            extractedSections: processedQuery.extractedSections,
+            extractedConcepts: processedQuery.legalConcepts,
+            searchVariantsUsed: searchVariants.map(v => v.formInput),
+            filtersApplied: Object.entries(filters).map(([k, v]) => `${k}: ${v}`),
+            relevanceThreshold: relevanceThreshold
           }
         };
 
@@ -696,8 +1184,25 @@ export default function createStatelessServer({
           content: [{ type: "text", text: JSON.stringify(response, null, 2) }]
         };
       } catch (error) {
+        const errorMessage = formatError(error, 'search');
         return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : 'Search failed' }]
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify({
+              cases: [],
+              totalResults: 0,
+              searchStatus: "ERROR",
+              error: {
+                message: errorMessage,
+                suggestions: [
+                  "Check your internet connection",
+                  "Verify your API key is valid",
+                  "Try simpler search terms",
+                  "Remove special characters from query"
+                ]
+              }
+            }, null, 2)
+          }]
         };
       }
     }
@@ -709,9 +1214,11 @@ export default function createStatelessServer({
     {
       documentId: z.string().describe("Document ID from search results"),
       searchTerms: z.array(z.string()).describe("Legal concepts or terms to extract"),
-      includeContext: z.boolean().optional().default(true).describe("Include surrounding context")
+      includeContext: z.boolean().optional().default(true).describe("Include surrounding context"),
+      fullText: z.boolean().optional().default(false).describe("Extract complete paragraphs without truncation"),
+      maxLength: z.number().min(500).max(5000).optional().default(2000).describe("Maximum text length per paragraph")
     },
-    async ({ documentId, searchTerms, includeContext }) => {
+    async ({ documentId, searchTerms, includeContext, fullText, maxLength }) => {
       try {
         const metadata = await client.getDocumentMetadata(documentId);
         
@@ -729,52 +1236,163 @@ export default function createStatelessServer({
           }
         }
 
-        const contextMarkers = [
-          /held that/i,
-          /court observed/i,
-          /principle of law/i,
-          /ratio decidendi/i,
-          /it was decided/i,
-          /we hold/i,
-          /accordingly/i
-        ];
+        // Check if we found any fragments
+        if (allFragments.length === 0) {
+          return {
+            content: [{ 
+              type: "text", 
+              text: JSON.stringify({
+                principles: [],
+                documentMetadata: {
+                  title: metadata.title,
+                  court: metadata.doctype,
+                  date: metadata.publishdate
+                },
+                error: {
+                  message: "No matching fragments found for the specified search terms",
+                  suggestions: [
+                    "Try broader search terms",
+                    "Use single keywords instead of phrases",
+                    "Check if the document contains these terms"
+                  ],
+                  searchTermsUsed: searchTerms
+                }
+              }, null, 2)
+            }]
+          };
+        }
 
-        const principles = allFragments.map((fragment, index) => {
-          const cleanText = stripHtml(fragment);
-          const hasLegalMarker = contextMarkers.some(marker => marker.test(cleanText));
+        // Extract complete paragraphs with real paragraph numbers
+        const completeParagraphs = extractCompleteParagraphs(
+          allFragments, 
+          fullText ? maxLength : 1500, 
+          true
+        );
+
+        // Define more comprehensive legal weight markers
+        const legalMarkers = {
+          ratioDecidendi: [
+            /we hold that/i,
+            /it is settled law/i,
+            /the principle is/i,
+            /we are of the opinion/i,
+            /the law is well[\s-]?settled/i,
+            /it is trite law/i,
+            /the ratio of/i
+          ],
+          obiterDicta: [
+            /it may be noted/i,
+            /incidentally/i,
+            /in passing/i,
+            /by the way/i,
+            /parenthetically/i
+          ],
+          distinguishing: [
+            /however in the present case/i,
+            /facts are different/i,
+            /not applicable here/i,
+            /distinguishable from/i,
+            /can be distinguished/i
+          ],
+          following: [
+            /following the decision/i,
+            /relying on/i,
+            /as held in/i,
+            /applying the principle/i
+          ]
+        };
+
+        const principles = completeParagraphs.map((para, index) => {
+          // Determine legal weight based on content
+          let legalWeight = "Supporting Observation";
+          let confidence = 0.5;
           
-          let context = { before: '', after: '' };
-          if (includeContext && index > 0) {
-            context.before = stripHtml(allFragments[index - 1] || '').substring(0, 150);
+          for (const [weight, patterns] of Object.entries(legalMarkers)) {
+            if (patterns.some(pattern => pattern.test(para.text))) {
+              switch (weight) {
+                case 'ratioDecidendi':
+                  legalWeight = "Ratio Decidendi";
+                  confidence = 0.9;
+                  break;
+                case 'obiterDicta':
+                  legalWeight = "Obiter Dicta";
+                  confidence = 0.6;
+                  break;
+                case 'distinguishing':
+                  legalWeight = "Distinguishing";
+                  confidence = 0.7;
+                  break;
+                case 'following':
+                  legalWeight = "Following Precedent";
+                  confidence = 0.8;
+                  break;
+              }
+              break;
+            }
           }
-          if (includeContext && index < allFragments.length - 1) {
-            context.after = stripHtml(allFragments[index + 1] || '').substring(0, 150);
+          
+          // Get context if requested
+          let context = { before: '', after: '' };
+          if (includeContext) {
+            if (index > 0) {
+              const prevPara = completeParagraphs[index - 1];
+              context.before = prevPara.text.substring(0, 200) + 
+                              (prevPara.text.length > 200 ? '...' : '');
+            }
+            if (index < completeParagraphs.length - 1) {
+              const nextPara = completeParagraphs[index + 1];
+              context.after = nextPara.text.substring(0, 200) + 
+                             (nextPara.text.length > 200 ? '...' : '');
+            }
           }
 
-          const paragraphNumber = extractParagraphNumber(fragment, index);
           const caseNumber = extractCaseNumber(metadata);
+          const parties = extractParties(metadata.title);
 
           return {
-            text: cleanText.substring(0, 500),
+            text: para.text,
+            paragraphNumber: para.paragraphNumber,
+            isComplete: para.isComplete,
             context: includeContext ? context : undefined,
             citation: {
-              full: `${metadata.title}, ${caseNumber}, para ${paragraphNumber}`,
-              short: `${caseNumber}, para ${paragraphNumber}`,
-              pinpoint: `at para ${paragraphNumber}`
+              full: `${parties}, ${metadata.publishdate?.split('-')[0] || ''}, para ${para.paragraphNumber}`,
+              short: `${parties.split(' v.')[0]}, para ${para.paragraphNumber}`,
+              pinpoint: `at para ${para.paragraphNumber}`,
+              neutral: metadata.tid ? `[Doc ID: ${metadata.tid}], para ${para.paragraphNumber}` : undefined
             },
-            legalWeight: hasLegalMarker ? "Ratio Decidendi" : "Supporting Observation",
-            confidence: hasLegalMarker ? 0.9 : 0.7
+            legalWeight: legalWeight,
+            confidence: confidence,
+            searchTermMatches: searchTerms.filter(term => 
+              para.text.toLowerCase().includes(term.toLowerCase())
+            )
           };
         });
 
+        // Sort by relevance (confidence and completeness)
+        principles.sort((a, b) => {
+          const scoreA = a.confidence * (a.isComplete ? 1.2 : 1) * 
+                         (a.searchTermMatches.length / searchTerms.length);
+          const scoreB = b.confidence * (b.isComplete ? 1.2 : 1) * 
+                         (b.searchTermMatches.length / searchTerms.length);
+          return scoreB - scoreA;
+        });
+
         const response = {
-          principles: principles.slice(0, 10),
+          principles: principles.slice(0, fullText ? 20 : 10),
           documentMetadata: {
             title: metadata.title,
-            court: metadata.doctype,
+            court: metadata.doctype || metadata.docsource,
             date: metadata.publishdate,
+            documentId: metadata.tid,
             totalFragments: allFragments.length,
             extractionConfidence: 0.85
+          },
+          extractionMetadata: {
+            searchTermsUsed: searchTerms,
+            fragmentsFound: allFragments.length,
+            paragraphsExtracted: principles.length,
+            fullTextMode: fullText,
+            maxLengthUsed: fullText ? maxLength : 1500
           }
         };
 
@@ -782,8 +1400,24 @@ export default function createStatelessServer({
           content: [{ type: "text", text: JSON.stringify(response, null, 2) }]
         };
       } catch (error) {
+        const errorMessage = formatError(error, 'extraction');
         return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : 'Extraction failed' }]
+          content: [{ 
+            type: "text", 
+            text: JSON.stringify({
+              principles: [],
+              error: {
+                message: errorMessage,
+                documentId: documentId,
+                searchTerms: searchTerms,
+                suggestions: [
+                  "Verify the document ID is correct",
+                  "Try different search terms",
+                  "Check if the document is accessible"
+                ]
+              }
+            }, null, 2)
+          }]
         };
       }
     }
