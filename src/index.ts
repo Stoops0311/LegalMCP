@@ -1218,7 +1218,7 @@ export default function createStatelessServer({
             relevanceScore: doc.relevanceScore.toFixed(2),
             matchedSections: doc.matchedSections || [],
             matchedConcepts: doc.matchedConcepts || [],
-            summary: doc.headline ? stripHtml(doc.headline).substring(0, 300) + '...' : 'No summary available',
+            summary: doc.headline ? stripHtml(doc.headline).substring(0, 4000) + '...' : 'No summary available',
             citations: doc.citation ? [doc.citation] : [],
             citedByCount: doc.numcitedby || 0,
             relevanceNote: "Below threshold but best available matches"
@@ -1256,7 +1256,7 @@ export default function createStatelessServer({
           relevanceScore: doc.relevanceScore.toFixed(2),
           matchedSections: doc.matchedSections || [],
           matchedConcepts: doc.matchedConcepts || [],
-          summary: doc.headline ? stripHtml(doc.headline).substring(0, 300) + '...' : 'No summary available',
+          summary: doc.headline ? stripHtml(doc.headline).substring(0, 4000) + '...' : 'No summary available',
           citations: doc.citation ? [doc.citation] : [],
           citedByCount: doc.numcitedby || 0,
           keyPrinciples: []
@@ -2050,7 +2050,7 @@ export default function createStatelessServer({
               // Get the most relevant case for this sub-issue
               const topCase = relevantCases[0];
               if (topCase.headline) {
-                const cleanSummary = stripHtml(topCase.headline).substring(0, 300);
+                const cleanSummary = stripHtml(topCase.headline).substring(0, 4000);
                 subIssueAnalysis += `**Key Precedent**: ${extractParties(topCase.title)} (${topCase.publishdate?.split('-')[0]})\n`;
                 subIssueAnalysis += `> "${cleanSummary}..."\n\n`;
               }
@@ -2097,7 +2097,7 @@ ${subIssues?.some(s => s.toLowerCase().includes('compromise')) ?
           const court = typeof c.doctype === 'string' ? c.doctype : c.docsource || 'Unknown Court';
           const year = c.publishdate?.split('-')[0] || '';
           const citation = c.citation || `${year} ${court}`;
-          const summary = c.headline ? stripHtml(c.headline).substring(0, 250) : 'No summary available';
+          const summary = c.headline ? stripHtml(c.headline).substring(0, 4000) : 'No summary available';
           
           let entry = `**${index + 1}. ${title}**\n`;
           entry += `   *Citation*: ${citation}\n`;
